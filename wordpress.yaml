@@ -1,0 +1,501 @@
+#    Copyright (C) 2019  Patrick Childs
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program. If not, see <https://www.gnu.org/licenses/>.
+# vim: set foldmarker={,} foldlevel=1 foldmethod=marker
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  Deploy a highly available wordpress instance with support for development.
+  Using 2 availability zones and multiple EC2 instances to ensure availability
+  The dev environment is smaller, and has lower instance counts, but still uses 2 Availability zones and at a minimum 2 ec2 instances.
+  Dev has this to avoid descrepencies between Dev and Prod in terms of content mirroring and such.
+
+Parameters:
+  # Is this prod or dev?
+  pIsProd:
+    Description: "Is this production or dev?"
+    Type: String
+    Default: false
+    AllowedValues:
+      - true
+      - false
+
+  pDBSize:
+    Description: "Database size in GB"
+    Type: Number
+    Default: 50
+
+  pProdCapacity:
+    Description: "Number of desired EC2 instances for prod"
+    Type: Number
+    Default: 6
+
+  pDevCapacity:
+    Description: "Number of desired EC2 instances for dev"
+    Type: Number
+    Default: 2
+
+  pAmiId:
+    Description: "An Amazon Linux "
+    Type: AWS::EC2::Image::Id
+    Default: 'ami-09b42976632b27e9b'
+
+  # Database details {
+  DBName:
+    Default: wordpressdb
+    Description: 'The database name'
+    Type: String
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+  DBUser:
+    NoEcho: 'true'
+    Description: 'The database admin account username'
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+  DBPassword:
+    NoEcho: 'true'
+    Description: 'The database admin account password'
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9]*'
+  # }
+
+  # Network CIDRS {
+  # IP range for the whole VPC
+  pVPCCidr:
+    Type: String
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    Default: '10.0.0.0/16'
+
+  pPrivateCidrOne:
+    Type: String
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    Default: '10.0.1.0/24'
+
+  pPrivateCidrTwo:
+    Type: String
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    Default: '10.0.2.0/24'
+  # IP Range for the whole public subnet
+  pPublicCidrOne:
+    Type: String
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    Default: '10.0.3.0/24'
+
+  pPublicCidrTwo:
+    Type: String
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    Default: '10.0.4.0/24'
+
+  # The IP Range to allow SSH through
+  pSSHIP:
+    Type: String
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    Default: "0.0.0.0/0"
+
+  #}
+
+  # Instance sizes {
+  # Dev {
+  pDevEC2Size:
+    Type: String
+    Default: "t2.small"
+  pDevRDSSize:
+    Type: String
+    Default: "db.t2.small"
+  # }
+  # Prod {
+  pProdEC2Size:
+    Type: String
+    Default: "t2.large"
+  pProdRDSSize:
+    Type: String
+    Default: "db.m3.large"
+  # }
+  # }
+
+  # The availability zone to use
+  pAZOne:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: "ap-southeast-2a"
+  pAZTwo:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: "ap-southeast-2b"
+
+  pKeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "The SSH Keypair to use on all ec2 instances"
+
+
+Conditions:
+  # Condition to ensure it is prod or dev
+  isProd: !Equals [!Ref pIsProd, 'true']
+
+Resources:
+  # Networking {
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !Ref pVPCCidr
+  VPCDefaultSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt VPC.DefaultSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: '0.0.0.0/0'
+  # Public networking {
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref pAZOne
+      VpcId: !Ref VPC
+      CidrBlock: !Ref pPublicCidrOne
+      MapPublicIpOnLaunch: true
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref pAZTwo
+      VpcId: !Ref VPC
+      CidrBlock: !Ref pPublicCidrTwo
+      MapPublicIpOnLaunch: true
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachement:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachement
+    Properties:
+      RouteTableId: !Ref 'PublicRouteTable'
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref 'InternetGateway'
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetTwo
+      RouteTableId: !Ref PublicRouteTable
+  # }
+  # Private Networking {
+  PrivateSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref pAZOne
+      VpcId: !Ref VPC
+      CidrBlock: !Ref pPrivateCidrOne
+  PrivateSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Ref pAZTwo
+      VpcId: !Ref VPC
+      CidrBlock: !Ref pPrivateCidrTwo
+  NatGatewayOneAttachment:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachement
+    Properties:
+        Domain: vpc
+  NatGatewayTwoAttachment:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachement
+    Properties:
+        Domain: vpc
+  NatGatewayOne:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayOneAttachment.AllocationId
+      SubnetId: !Ref PublicSubnetOne
+  NatGatewayTwo:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayTwoAttachment.AllocationId
+      SubnetId: !Ref PublicSubnetTwo
+  PrivateRouteTableOne:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PrivateRouteOne:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableOne
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayOne
+  PrivateRouteTableOneAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableOne
+      SubnetId: !Ref PrivateSubnetOne
+  PrivateRouteTableTwo:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PrivateRouteTwo:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableTwo
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayTwo
+  PrivateRouteTableTwoAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableTwo
+      SubnetId: !Ref PrivateSubnetTwo
+  # }
+  # }
+  # ALB {
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPath: /wordpress/wp-admin/install.php
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref VPC
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'true'
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: '30'
+  # }
+  WebServerSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: "WebServerSecurityGroup"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Select
+            - 0
+            - !GetAtt 'ApplicationLoadBalancer.SecurityGroups'
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref pSSHIP
+      VpcId: !Ref VPC
+  WebServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+      LaunchConfigurationName: !Ref 'LaunchConfig'
+      MinSize: '1'
+      MaxSize: '10'
+      DesiredCapacity: !If [isProd, !Ref pProdCapacity, !Ref pDevCapacity]
+      TargetGroupARNs:
+        - !Ref 'ALBTargetGroup'
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          wordpress_install:
+            - install_cfn
+            - install_wordpress
+        install_cfn:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Join
+                - ''
+                - - "[main]\n"
+                  - stack=
+                  - !Ref 'AWS::StackId'
+                  - "\n"
+                  - region=
+                  - !Ref 'AWS::Region'
+                  - "\n"
+              mode: '000400'
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Join
+                - ''
+                - - "[cfn-auto-reloader-hook]\n"
+                  - "triggers=post.update\n"
+                  - "path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init\n"
+                  - 'action=/opt/aws/bin/cfn-init -v '
+                  - '         --stack '
+                  - !Ref 'AWS::StackName'
+                  - '         --resource LaunchConfig '
+                  - '         --configsets wordpress_install '
+                  - '         --region '
+                  - !Ref 'AWS::Region'
+                  - "\n"
+              mode: '000400'
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+        install_wordpress:
+          packages:
+            yum:
+              php: []
+              php-mysql: []
+              mysql: []
+              httpd: []
+          sources:
+            /var/www/html: https://en-au.wordpress.org/wordpress-5.0.4-en_AU.tar.gz
+          files:
+            /tmp/create-wp-config:
+              content: !Join
+                - ''
+                - - "#!/bin/bash\n"
+                  - "cp /var/www/html/wordpress/wp-config-sample.php /var/www/html/wordpress/wp-config.php\n"
+                  - sed -i "s/'database_name_here'/'
+                  - !Ref 'DBName'
+                  - "'/g\" wp-config.php\n"
+                  - sed -i "s/'username_here'/'
+                  - !Ref 'DBUser'
+                  - "'/g\" wp-config.php\n"
+                  - sed -i "s/'password_here'/'
+                  - !Ref 'DBPassword'
+                  - "'/g\" wp-config.php\n"
+                  - sed -i "s/'localhost'/'
+                  - !GetAtt 'DBInstance.Endpoint.Address'
+                  - "'/g\" wp-config.php\n"
+              mode: '000500'
+              owner: root
+              group: root
+          commands:
+            '01_configure_wordpress':
+              command: /tmp/create-wp-config
+              cwd: /var/www/html/wordpress
+          services:
+            sysvinit:
+              httpd:
+                enabled: 'true'
+                ensureRunning: 'true'
+    Properties:
+      ImageId: !Ref pAmiId
+      InstanceType: !If [isProd, !Ref pProdEC2Size, !Ref pDevEC2Size]
+      SecurityGroups:
+        - !Ref 'WebServerSecurityGroup'
+      KeyName: !Ref pKeyPairName
+      UserData: !Base64
+        Fn::Join:
+          - ''
+          - - "#!/bin/bash -xe\n"
+            - "yum update -y aws-cfn-bootstrap\n"
+            - '/opt/aws/bin/cfn-init -v '
+            - '         --stack '
+            - !Ref 'AWS::StackName'
+            - '         --resource LaunchConfig '
+            - '         --configsets wordpress_install '
+            - '         --region '
+            - !Ref 'AWS::Region'
+            - "\n"
+            - '/opt/aws/bin/cfn-signal -e $? '
+            - '         --stack '
+            - !Ref 'AWS::StackName'
+            - '         --resource WebServerGroup '
+            - '         --region '
+            - !Ref 'AWS::Region'
+            - "\n"
+  DBEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open database for access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+      VpcId: !Ref VPC
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription:
+        Fn::Join:
+        - ''
+        - - 'RDS Subnet Group for '
+          - Ref: AWS::StackName
+      SubnetIds:
+      - !Ref PrivateSubnetOne
+      - !Ref PrivateSubnetTwo
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DBName
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      Engine: MySQL
+      MultiAZ: !If [isProd, true, false]
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      DBInstanceClass: !If [isProd, !Ref pProdRDSSize, !Ref pDevRDSSize]
+      AllocatedStorage: !Ref pDBSize
+      VPCSecurityGroups:
+        - !Ref DBEC2SecurityGroup
+Outputs:
+  WebsiteURL:
+    Value: !Join
+      - ''
+      - - http://
+        - !GetAtt 'ApplicationLoadBalancer.DNSName'
+        - /wordpress
+    Description: WordPress Website
